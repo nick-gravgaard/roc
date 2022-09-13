@@ -297,11 +297,12 @@ replaceEach = \haystack, needle, flower ->
 ##
 ##     Str.replaceFirst "foo/bar/baz" "/" "_" == Ok "foo_bar/baz"
 replaceFirst : Str, Str, Str -> Result Str [NotFound]*
-replaceFirst = \haystack, needle, flower ->
-    when splitFirst haystack needle is
-        Ok { before, after } ->
-            "\(before)\(flower)\(after)"
-        err -> err
+replaceFirst = \haystack, _, _ -> Ok haystack
+# replaceFirst = \haystack, needle, flower ->
+#     when splitFirst haystack needle is
+#         Ok { before, after } ->
+#             "\(before)\(flower)\(after)"
+#         err -> err
 
 ## Returns the string with the last occurrence of a substring replaced with a replacement.
 ## If the substring is not found, returns `Err NotFound`.
