@@ -1,5 +1,5 @@
 use bitflags::bitflags;
-use roc_collections::VecMap;
+use roc_collections::{VecMap, VecSet};
 use roc_debug_flags::dbg_do;
 #[cfg(debug_assertions)]
 use roc_debug_flags::{ROC_PRINT_MISMATCHES, ROC_PRINT_UNIFICATIONS};
@@ -338,6 +338,7 @@ impl<M: MetaCollector> Outcome<M> {
 pub struct Env<'a> {
     pub subs: &'a mut Subs,
     compute_outcome_only: bool,
+    seen_recursion: VecSet<(Variable, Variable)>,
 }
 
 impl<'a> Env<'a> {
@@ -345,6 +346,7 @@ impl<'a> Env<'a> {
         Self {
             subs,
             compute_outcome_only: false,
+            seen_recursion: Default::default(),
         }
     }
 
@@ -355,6 +357,25 @@ impl<'a> Env<'a> {
         let result = f(self);
         self.compute_outcome_only = false;
         result
+    }
+
+    fn add_recursion_pair(&mut self, var1: Variable, var2: Variable) {
+        let pair = (
+            self.subs.get_root_key_without_compacting(var1),
+            self.subs.get_root_key_without_compacting(var2),
+        );
+
+        let already_seen = self.seen_recursion.insert(pair);
+        debug_assert!(!already_seen);
+    }
+
+    fn seen_recursion_pair(&self, var1: Variable, var2: Variable) -> bool {
+        let (var1, var2) = (
+            self.subs.get_root_key_without_compacting(var1),
+            self.subs.get_root_key_without_compacting(var2),
+        );
+
+        self.seen_recursion.contains(&(var1, var2)) || self.seen_recursion.contains(&(var2, var1))
     }
 }
 
@@ -853,7 +874,13 @@ fn unify_alias<M: MetaCollector>(
             // Alias wins
             merge(env, ctx, Alias(symbol, args, real_var, kind))
         }
-        RecursionVar { structure, .. } => unify_pool(env, pool, real_var, *structure, ctx.mode),
+        RecursionVar { structure, .. } => {
+            if env.seen_recursion_pair(ctx.first, ctx.second) {
+                return Default::default()
+            }
+            env.add_recursion_pair(ctx.first, ctx.second);
+            unify_pool(env, pool, real_var, *structure, ctx.mode)
+        }
         RigidVar(_) | RigidAbleVar(..) | FlexAbleVar(..) => {
             unify_pool(env, pool, real_var, ctx.second, ctx.mode)
         }
@@ -925,7 +952,13 @@ fn unify_opaque<M: MetaCollector>(
         Alias(_, _, other_real_var, AliasKind::Structural) => {
             unify_pool(env, pool, ctx.first, *other_real_var, ctx.mode)
         }
-        RecursionVar { structure, .. } => unify_pool(env, pool, ctx.first, *structure, ctx.mode),
+        RecursionVar { structure, .. } => {
+            if env.seen_recursion_pair(ctx.first, ctx.second) {
+                return Default::default();
+            }
+            env.add_recursion_pair(ctx.first, ctx.second);
+            unify_pool(env, pool, ctx.first, *structure, ctx.mode)
+        }
         Alias(other_symbol, other_args, other_real_var, AliasKind::Opaque) => {
             // Opaques types are only equal if the opaque symbols are equal!
             if symbol == *other_symbol {
@@ -998,27 +1031,34 @@ fn unify_structure<M: MetaCollector>(
                 &other
             )
         }
-        RecursionVar { structure, .. } => match flat_type {
-            FlatType::TagUnion(_, _) => {
-                // unify the structure with this unrecursive tag union
-                unify_pool(env, pool, ctx.first, *structure, ctx.mode)
+        RecursionVar { structure, .. } => {
+            if env.seen_recursion_pair(ctx.first, ctx.second) {
+                return Default::default();
             }
-            FlatType::RecursiveTagUnion(rec, _, _) => {
-                debug_assert!(is_recursion_var(env.subs, *rec));
-                // unify the structure with this recursive tag union
-                unify_pool(env, pool, ctx.first, *structure, ctx.mode)
+            env.add_recursion_pair(ctx.first, ctx.second);
+
+            match flat_type {
+                FlatType::TagUnion(_, _) => {
+                    // unify the structure with this unrecursive tag union
+                    unify_pool(env, pool, ctx.first, *structure, ctx.mode)
+                }
+                FlatType::RecursiveTagUnion(rec, _, _) => {
+                    debug_assert!(is_recursion_var(env.subs, *rec));
+                    // unify the structure with this recursive tag union
+                    unify_pool(env, pool, ctx.first, *structure, ctx.mode)
+                }
+                FlatType::FunctionOrTagUnion(_, _, _) => {
+                    // unify the structure with this unrecursive tag union
+                    unify_pool(env, pool, ctx.first, *structure, ctx.mode)
+                }
+                // Only tag unions can be recursive; everything else is an error.
+                _ => mismatch!(
+                    "trying to unify {:?} with recursive type var {:?}",
+                    &flat_type,
+                    structure
+                ),
             }
-            FlatType::FunctionOrTagUnion(_, _, _) => {
-                // unify the structure with this unrecursive tag union
-                unify_pool(env, pool, ctx.first, *structure, ctx.mode)
-            }
-            // Only tag unions can be recursive; everything else is an error.
-            _ => mismatch!(
-                "trying to unify {:?} with recursive type var {:?}",
-                &flat_type,
-                structure
-            ),
-        },
+        }
 
         Structure(ref other_flat_type) => {
             // Unify the two flat types
@@ -1088,6 +1128,11 @@ fn unify_lambda_set<M: MetaCollector>(
             }
         }
         RecursionVar { structure, .. } => {
+            if env.seen_recursion_pair(ctx.first, ctx.second) {
+                return Default::default();
+            }
+            env.add_recursion_pair(ctx.first, ctx.second);
+
             // suppose that the recursion var is a lambda set
             unify_pool(env, pool, ctx.first, *structure, ctx.mode)
         }
@@ -3007,6 +3052,12 @@ fn unify_recursion<M: MetaCollector>(
     structure: Variable,
     other: &Content,
 ) -> Outcome<M> {
+    if env.seen_recursion_pair(ctx.first, ctx.second) {
+        return Default::default();
+    }
+
+    env.add_recursion_pair(ctx.first, ctx.second);
+
     match other {
         RecursionVar {
             opt_name: other_opt_name,
