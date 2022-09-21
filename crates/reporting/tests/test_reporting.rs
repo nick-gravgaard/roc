@@ -10717,6 +10717,7 @@ All branches in an `if` must have the same type!
     );
 
     test_report!(
+        #[ignore = "https://github.com/roc-lang/roc/issues/4096"]
         unnecessary_builtin_module_import,
         indoc!(
             r#"
@@ -10730,6 +10731,7 @@ All branches in an `if` must have the same type!
     );
 
     test_report!(
+        #[ignore = "https://github.com/roc-lang/roc/issues/4096"]
         unnecessary_builtin_type_import,
         indoc!(
             r#"
